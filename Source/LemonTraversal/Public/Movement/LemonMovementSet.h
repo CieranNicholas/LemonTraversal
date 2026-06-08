@@ -29,6 +29,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gait")
 	FLemonGaitSettings Sprint;
 
+	/** Tuning for the slide custom movement mode (CMOVE_Slide). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide")
+	FLemonSlideSettings Slide;
+
 	/** Returns the tuning struct for the requested gait (defaults to Run for safety). */
 	const FLemonGaitSettings& GetSettingsForGait(ELemonGait Gait) const;
 };

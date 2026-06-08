@@ -3,6 +3,16 @@
 #include "Movement/LemonCharacterMovementComponent.h"
 #include "Movement/LemonMovementSet.h"
 #include "Movement/LemonSavedMove.h"
+#include "GameFramework/Character.h"
+#include "Engine/Engine.h"
+#include "HAL/IConsoleManager.h"
+
+#if !UE_BUILD_SHIPPING
+static TAutoConsoleVariable<bool> CVarLemonSlideDebug(
+	TEXT("lemon.SlideDebug"),
+	false,
+	TEXT("Draw on-screen LemonTraversal movement debug for the locally-controlled character."));
+#endif
 
 ULemonCharacterMovementComponent::ULemonCharacterMovementComponent()
 {
@@ -74,6 +84,10 @@ ELemonGait ULemonCharacterMovementComponent::ResolveGait() const
 
 float ULemonCharacterMovementComponent::GetMaxSpeed() const
 {
+	if (IsSliding())
+	{
+		return GetSlideSettings().MaxSpeed;
+	}
 	if (ShouldUseGaitTuning())
 	{
 		return GetActiveGaitSettings().MaxSpeed;
@@ -92,6 +106,10 @@ float ULemonCharacterMovementComponent::GetMaxAcceleration() const
 
 float ULemonCharacterMovementComponent::GetMaxBrakingDeceleration() const
 {
+	if (IsSliding())
+	{
+		return GetSlideSettings().BrakingDeceleration;
+	}
 	if (ShouldUseGaitTuning())
 	{
 		return GetActiveGaitSettings().BrakingDeceleration;
@@ -114,6 +132,17 @@ void ULemonCharacterMovementComponent::OnMovementUpdated(float DeltaSeconds, con
 
 	// Cache the resolved gait after the move so gameplay/animation can query GetGait().
 	CurrentGait = ResolveGait();
+
+#if !UE_BUILD_SHIPPING
+	if (CVarLemonSlideDebug.GetValueOnGameThread() && GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
+	{
+		const TCHAR* ModeStr = IsSliding() ? TEXT("SLIDE")
+			: (IsMovingOnGround() ? TEXT("Ground") : (IsFalling() ? TEXT("Falling") : TEXT("Other")));
+		GEngine->AddOnScreenDebugMessage(0x1E33, 0.f, FColor::Cyan,
+			FString::Printf(TEXT("Lemon | %s | Spd %.0f (2D %.0f) | Floor %d | WantsCrouch %d"),
+				ModeStr, Velocity.Size(), Velocity.Size2D(), CurrentFloor.IsWalkableFloor() ? 1 : 0, (int32)bWantsToCrouch));
+	}
+#endif
 }
 
 FNetworkPredictionData_Client* ULemonCharacterMovementComponent::GetPredictionData_Client() const
@@ -127,4 +156,226 @@ FNetworkPredictionData_Client* ULemonCharacterMovementComponent::GetPredictionDa
 	}
 
 	return ClientPredictionData;
+}
+
+/*
+	* Slide (CMOVE_Slide)
+	* A custom movement mode. Triggered by the engine's built-in crouch intent (bWantsToCrouch) while
+	* movement speed is past the configured threshold, so it needs NO new predicted state.
+*/
+
+bool ULemonCharacterMovementComponent::IsSliding() const
+{
+	return (MovementMode == MOVE_Custom) && (CustomMovementMode == CMOVE_Slide);
+}
+
+const FLemonSlideSettings& ULemonCharacterMovementComponent::GetSlideSettings() const
+{
+	if (MovementSet)
+	{
+		return MovementSet->Slide;
+	}
+	return DefaultSlideSettings;
+}
+
+bool ULemonCharacterMovementComponent::CanSlide() const
+{
+	if (!UpdatedComponent || !IsMovingOnGround())
+	{
+		return false;
+	}
+
+	// Enough speed to be worth sliding (3D speed so a downhill descent counts fully).
+	if (Velocity.SizeSquared() < FMath::Square(GetSlideSettings().EnterSpeed))
+	{
+		return false;
+	}
+
+	return CurrentFloor.IsWalkableFloor();
+}
+
+void ULemonCharacterMovementComponent::EnterSlide()
+{
+	const FLemonSlideSettings& Slide = GetSlideSettings();
+
+	// One-time forward boost along the current planar velocity.
+	Velocity += Velocity.GetSafeNormal2D() * Slide.EnterImpulse;
+
+	// Clamp so chained entries can't stack absurd speed.
+	if (Velocity.SizeSquared() > FMath::Square(Slide.MaxSpeed))
+	{
+		Velocity = Velocity.GetSafeNormal() * Slide.MaxSpeed;
+	}
+}
+
+void ULemonCharacterMovementComponent::ExitSlide()
+{
+	// Nothing to tear down yet — hook point for future slide camera / animation state.
+}
+
+bool ULemonCharacterMovementComponent::CanCrouchInCurrentState() const
+{
+	// Keep the lowered capsule valid during the slide; the base would otherwise un-crouch in MOVE_Custom
+	// (CanCrouchInCurrentState requires IsMovingOnGround(), which excludes custom modes).
+	if (IsSliding())
+	{
+		return CanEverCrouch();
+	}
+	return Super::CanCrouchInCurrentState();
+}
+
+bool ULemonCharacterMovementComponent::CanAttemptJump() const
+{
+	// Allow jumping out of a slide (slide-hop). The base blocks it because bWantsToCrouch is set.
+	if (IsSliding())
+	{
+		return IsJumpAllowed();
+	}
+	return Super::CanAttemptJump();
+}
+
+void ULemonCharacterMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
+{
+	// Base applies crouch / un-crouch from bWantsToCrouch (lowers the capsule).
+	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+
+	// Enter a slide when crouch is pressed while running fast on walkable ground. Walking-only (NOT
+	// Falling) is deliberate: re-entering from Falling would instantly cancel a slide-hop, because DoJump
+	// drops us to MOVE_Falling and this check runs right afterwards in the same move.
+	if (MovementMode == MOVE_Walking && bWantsToCrouch && CanSlide())
+	{
+		SetMovementMode(MOVE_Custom, CMOVE_Slide);
+	}
+}
+
+void ULemonCharacterMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode)
+{
+	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
+
+	if (IsSliding())
+	{
+		EnterSlide();
+	}
+	else if (PreviousMovementMode == MOVE_Custom && PreviousCustomMode == CMOVE_Slide)
+	{
+		ExitSlide();
+	}
+}
+
+void ULemonCharacterMovementComponent::PhysCustom(float DeltaTime, int32 Iterations)
+{
+	Super::PhysCustom(DeltaTime, Iterations);
+
+	if (CustomMovementMode == CMOVE_Slide)
+	{
+		PhysSlide(DeltaTime, Iterations);
+	}
+}
+
+void ULemonCharacterMovementComponent::PhysSlide(float deltaTime, int32 Iterations)
+{
+	if (deltaTime < MIN_TICK_TIME)
+	{
+		return;
+	}
+
+	const FLemonSlideSettings& Slide = GetSlideSettings();
+
+	// Sub-step loop, mirroring PhysWalking so behaviour is framerate-independent.
+	float remainingTime = deltaTime;
+	while ((remainingTime >= MIN_TICK_TIME) && (Iterations < MaxSimulationIterations) && CharacterOwner
+		&& (CharacterOwner->Controller || bRunPhysicsWithNoController || CharacterOwner->GetLocalRole() == ROLE_SimulatedProxy))
+	{
+		Iterations++;
+		const float timeTick = GetSimulationTimeStep(remainingTime, Iterations);
+		remainingTime -= timeTick;
+
+		// Exit to walking if crouch is released or we've slowed below the threshold (3D speed so a
+		// fast descent down a slope keeps the slide alive).
+		if (!bWantsToCrouch || Velocity.SizeSquared() < FMath::Square(Slide.MinSpeed))
+		{
+			SetMovementMode(MOVE_Walking);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		const FVector OldLocation = UpdatedComponent->GetComponentLocation();
+
+		// A slide needs a walkable surface beneath us.
+		FindFloor(OldLocation, CurrentFloor, false);
+		if (!CurrentFloor.IsWalkableFloor())
+		{
+			SetMovementMode(MOVE_Falling);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+		const FVector FloorNormal = CurrentFloor.HitResult.ImpactNormal;
+
+		RestorePreAdditiveRootMotionVelocity();
+
+		// Bleed speed with low slide friction + braking ONLY. Movement input must not add thrust, so
+		// CalcVelocity runs with zero acceleration (a slide is carried momentum, not driven movement).
+		const FVector RealAcceleration = Acceleration;
+		Acceleration = FVector::ZeroVector;
+		CalcVelocity(timeTick, Slide.Friction, false, GetMaxBrakingDeceleration());
+		Acceleration = RealAcceleration;
+
+		// Steering: gently rotate the slide's heading toward sideways input WITHOUT changing speed.
+		// Forward/back input contributes nothing (SteerSign ~ 0); only the sideways component turns you.
+		if (!RealAcceleration.IsNearlyZero() && !Velocity.IsNearlyZero())
+		{
+			const FVector VelDir = Velocity.GetSafeNormal2D();
+			const FVector InputDir = RealAcceleration.GetSafeNormal2D();
+			const float SteerSign = FVector::CrossProduct(VelDir, InputDir).Z; // -1..1, 0 when straight ahead
+			Velocity = Velocity.RotateAngleAxis(SteerSign * Slide.SteerRate * timeTick, FVector::UpVector);
+		}
+
+		// Slope acceleration: gravity along the floor plane (downhill speeds up, uphill slows). Keep the
+		// velocity horizontal afterwards — MoveAlongFloor does its OWN ramp adjustment, so feeding it
+		// slope-projected velocity double-counts the slope, drives the capsule into the ramp and stalls
+		// the slide (the flicker bug).
+		const FVector SlopeAccel = FVector::VectorPlaneProject(GetGravityDirection(), FloorNormal) * Slide.SlopeForce;
+		Velocity += SlopeAccel * timeTick;
+		MaintainHorizontalGroundVelocity();
+
+		ApplyRootMotionToVelocity(timeTick);
+
+		// Move along the floor (handles ramps, steps and surface sliding).
+		FStepDownResult StepDownResult;
+		MoveAlongFloor(Velocity, timeTick, &StepDownResult);
+
+		if (MovementMode != MOVE_Custom)
+		{
+			// MoveAlongFloor changed the mode (e.g. entered water); let the new mode take over.
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		// Refresh the floor after the move.
+		if (StepDownResult.bComputedFloor)
+		{
+			CurrentFloor = StepDownResult.FloorResult;
+		}
+		else
+		{
+			FindFloor(UpdatedComponent->GetComponentLocation(), CurrentFloor, false);
+		}
+
+		if (!CurrentFloor.IsWalkableFloor())
+		{
+			SetMovementMode(MOVE_Falling);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		AdjustFloorHeight();
+		SetBaseFromFloor(CurrentFloor);
+
+		// Derive velocity from the actual displacement so collisions / ramps bleed speed correctly.
+		if (!bJustTeleported && timeTick >= MIN_TICK_TIME)
+		{
+			Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / timeTick;
+		}
+		MaintainHorizontalGroundVelocity();
+	}
 }

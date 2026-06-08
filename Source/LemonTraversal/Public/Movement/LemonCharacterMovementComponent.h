@@ -35,16 +35,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lemon|Movement")
 	ELemonGait GetGait() const { return CurrentGait; }
 
+	/** True while in the custom slide movement mode (MOVE_Custom / CMOVE_Slide). */
+	UFUNCTION(BlueprintPure, Category = "Lemon|Movement")
+	bool IsSliding() const;
+
 	//~ Begin UCharacterMovementComponent interface
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
 	virtual float GetMaxBrakingDeceleration() const override;
 	virtual void UpdateFromCompressedFlags(uint8 Flags) override;
 	virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
+	virtual bool CanAttemptJump() const override;
 	//~ End UCharacterMovementComponent interface
 
 protected:
 	virtual void OnMovementUpdated(float DeltaSeconds, const FVector& OldLocation, const FVector& OldVelocity) override;
+	virtual void PhysCustom(float DeltaTime, int32 Iterations) override;
+	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
+	virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
+	virtual bool CanCrouchInCurrentState() const override;
 
 	/** Resolve the active gait from intent + movement state. Deterministic given prediction-safe inputs. */
 	ELemonGait ResolveGait() const;
@@ -57,6 +66,22 @@ protected:
 
 	/** Movement modes whose speed/accel/braking are governed by gait tuning. */
 	bool ShouldUseGaitTuning() const;
+
+	// --- Slide ---
+	/** Per-frame physics for CMOVE_Slide (modeled on the engine's PhysWalking). */
+	void PhysSlide(float DeltaTime, int32 Iterations);
+
+	/** True if a slide may begin right now (grounded, walkable floor, fast enough). */
+	bool CanSlide() const;
+
+	/** Apply slide-entry effects (one-time momentum boost). Capsule is lowered by the base crouch. */
+	void EnterSlide();
+
+	/** Tear-down when leaving the slide mode. */
+	void ExitSlide();
+
+	/** Active slide tuning, falling back to built-in defaults when no MovementSet is assigned. */
+	const FLemonSlideSettings& GetSlideSettings() const;
 
 	// --- Prediction-safe intent --------------------------------------------------------------
 	// Mirrored into FSavedMove_Lemon and packed into compressed flags. The "Safe_" prefix marks
@@ -71,4 +96,5 @@ protected:
 private:
 	/** Fallback tuning used when MovementSet is null, so the component still works out-of-the-box. */
 	FLemonGaitSettings DefaultGaitSettings;
+	FLemonSlideSettings DefaultSlideSettings;
 };
