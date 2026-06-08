@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "LemonTraversal",
+	"Description": "Advanced FPS movement system — sliding, mantling, wall-running, vaulting and more, built on a custom Character Movement Component.",
+	"Category": "Movement",
+	"CreatedBy": "Cieran Nicholas",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "LemonTraversal",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
