@@ -39,6 +39,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lemon|Movement")
 	bool IsSliding() const;
 
+	/** True when a jump pressed right now should be forgiven as a grounded jump (coyote time): we left the
+	 *  ground by walking off a ledge (not jumping) and are still within the grace window. Read by the
+	 *  character's CanJumpInternal/CheckJumpInput overrides. */
+	UFUNCTION(BlueprintPure, Category = "Lemon|Movement")
+	bool CanCoyoteJump() const;
+
 	//~ Begin UCharacterMovementComponent interface
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
@@ -83,11 +89,19 @@ protected:
 	/** Active slide tuning, falling back to built-in defaults when no MovementSet is assigned. */
 	const FLemonSlideSettings& GetSlideSettings() const;
 
+	/** Coyote-time grace window (seconds), from the MovementSet or the built-in fallback. */
+	float GetCoyoteTime() const;
+
 	// --- Prediction-safe intent --------------------------------------------------------------
 	// Mirrored into FSavedMove_Lemon and packed into compressed flags. The "Safe_" prefix marks
 	// state that must survive client move replay during server correction.
 	uint8 Safe_bWantsToSprint : 1;
 	uint8 Safe_bWantsToWalk : 1;
+
+	/** Seconds airborne since we last left the ground (reset on ground / slide, accumulated while falling).
+	 *  Derived state, but still prediction-safe: it's mirrored into FSavedMove_Lemon so a coyote jump
+	 *  replays identically after a server correction. The first predicted *non-boolean* state in the CMC. */
+	float Safe_CoyoteTime;
 
 	/** Gait resolved each movement tick. Derived state — intentionally not replicated. */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Lemon|Movement")
@@ -97,4 +111,5 @@ private:
 	/** Fallback tuning used when MovementSet is null, so the component still works out-of-the-box. */
 	FLemonGaitSettings DefaultGaitSettings;
 	FLemonSlideSettings DefaultSlideSettings;
+	float DefaultCoyoteTime = 0.15f;
 };

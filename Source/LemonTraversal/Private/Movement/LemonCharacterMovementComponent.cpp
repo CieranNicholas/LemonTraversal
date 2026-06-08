@@ -18,6 +18,7 @@ ULemonCharacterMovementComponent::ULemonCharacterMovementComponent()
 {
 	Safe_bWantsToSprint = 0;
 	Safe_bWantsToWalk = 0;
+	Safe_CoyoteTime = 0.f;
 	CurrentGait = ELemonGait::Run;
 
 	// Fallback used only when no MovementSet asset is assigned (mirrors ULemonMovementSet's Run defaults).
@@ -139,8 +140,9 @@ void ULemonCharacterMovementComponent::OnMovementUpdated(float DeltaSeconds, con
 		const TCHAR* ModeStr = IsSliding() ? TEXT("SLIDE")
 			: (IsMovingOnGround() ? TEXT("Ground") : (IsFalling() ? TEXT("Falling") : TEXT("Other")));
 		GEngine->AddOnScreenDebugMessage(0x1E33, 0.f, FColor::Cyan,
-			FString::Printf(TEXT("Lemon | %s | Spd %.0f (2D %.0f) | Floor %d | WantsCrouch %d"),
-				ModeStr, Velocity.Size(), Velocity.Size2D(), CurrentFloor.IsWalkableFloor() ? 1 : 0, (int32)bWantsToCrouch));
+			FString::Printf(TEXT("Lemon | %s | Spd %.0f (2D %.0f) | Floor %d | WantsCrouch %d | Coyote %.2f/%.2f%s"),
+				ModeStr, Velocity.Size(), Velocity.Size2D(), CurrentFloor.IsWalkableFloor() ? 1 : 0, (int32)bWantsToCrouch,
+				Safe_CoyoteTime, GetCoyoteTime(), CanCoyoteJump() ? TEXT(" [JUMP OK]") : TEXT("")));
 	}
 #endif
 }
@@ -176,6 +178,25 @@ const FLemonSlideSettings& ULemonCharacterMovementComponent::GetSlideSettings() 
 		return MovementSet->Slide;
 	}
 	return DefaultSlideSettings;
+}
+
+float ULemonCharacterMovementComponent::GetCoyoteTime() const
+{
+	return MovementSet ? MovementSet->CoyoteTime : DefaultCoyoteTime;
+}
+
+bool ULemonCharacterMovementComponent::CanCoyoteJump() const
+{
+	// Only forgive a jump while we're airborne, and only if we got here by walking off a ledge. A real
+	// jump bumps JumpCurrentCountPreJump above 0 (set at the top of CheckJumpInput, before the falling
+	// pre-increment), so this cleanly excludes mid-air / double jumps from being re-forgiven.
+	if (!CharacterOwner || !IsFalling() || CharacterOwner->JumpCurrentCountPreJump > 0)
+	{
+		return false;
+	}
+
+	const float Window = GetCoyoteTime();
+	return Window > 0.f && Safe_CoyoteTime <= Window;
 }
 
 bool ULemonCharacterMovementComponent::CanSlide() const
@@ -238,6 +259,19 @@ void ULemonCharacterMovementComponent::UpdateCharacterStateBeforeMovement(float 
 {
 	// Base applies crouch / un-crouch from bWantsToCrouch (lowers the capsule).
 	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+
+	// Coyote time: tally how long we've been airborne since leaving the ground, so a jump pressed within
+	// the grace window still counts as a grounded jump (see CanCoyoteJump). Runs before CheckJumpInput,
+	// on both the owning client and the server, accumulating the same per-move dt either side. Ground and
+	// slide both count as "on the ground" for jump purposes, so we reset there and only tally while falling.
+	if (IsFalling())
+	{
+		Safe_CoyoteTime += DeltaSeconds;
+	}
+	else
+	{
+		Safe_CoyoteTime = 0.f;
+	}
 
 	// Enter a slide when crouch is pressed while running fast on walkable ground. Walking-only (NOT
 	// Falling) is deliberate: re-entering from Falling would instantly cancel a slide-hop, because DoJump

@@ -25,6 +25,10 @@ public:
 	uint8 Saved_bWantsToSprint : 1;
 	uint8 Saved_bWantsToWalk : 1;
 
+	/** Airborne time carried for coyote-time prediction (mirrors the CMC's Safe_CoyoteTime). Unlike the
+	 *  booleans above this is continuous state, so it rides here rather than in a compressed flag. */
+	float Saved_CoyoteTime;
+
 	FSavedMove_Lemon();
 
 	//~ Begin FSavedMove_Character interface

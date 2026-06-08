@@ -11,6 +11,7 @@ FSavedMove_Lemon::FSavedMove_Lemon()
 {
 	Saved_bWantsToSprint = 0;
 	Saved_bWantsToWalk = 0;
+	Saved_CoyoteTime = 0.f;
 }
 
 void FSavedMove_Lemon::Clear()
@@ -18,6 +19,7 @@ void FSavedMove_Lemon::Clear()
 	Super::Clear();
 	Saved_bWantsToSprint = 0;
 	Saved_bWantsToWalk = 0;
+	Saved_CoyoteTime = 0.f;
 }
 
 uint8 FSavedMove_Lemon::GetCompressedFlags() const
@@ -33,6 +35,9 @@ bool FSavedMove_Lemon::CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* 
 	const FSavedMove_Lemon* NewLemonMove = static_cast<const FSavedMove_Lemon*>(NewMove.Get());
 	if (Saved_bWantsToSprint != NewLemonMove->Saved_bWantsToSprint) { return false; }
 	if (Saved_bWantsToWalk != NewLemonMove->Saved_bWantsToWalk) { return false; }
+	// Note: Saved_CoyoteTime is deliberately NOT compared here. It accumulates linearly with dt, so a
+	// combined move (replayed from the older move's value over the summed dt) reaches the same total; and
+	// the base already refuses to combine across a jump-press frame, so a coyote jump is never merged away.
 	return Super::CanCombineWith(NewMove, InCharacter, MaxDelta);
 }
 
@@ -43,6 +48,7 @@ void FSavedMove_Lemon::SetMoveFor(ACharacter* C, float InDeltaTime, FVector cons
 	{
 		Saved_bWantsToSprint = CMC->Safe_bWantsToSprint;
 		Saved_bWantsToWalk = CMC->Safe_bWantsToWalk;
+		Saved_CoyoteTime = CMC->Safe_CoyoteTime;
 	}
 }
 
@@ -53,6 +59,7 @@ void FSavedMove_Lemon::PrepMoveFor(ACharacter* C)
 	{
 		CMC->Safe_bWantsToSprint = Saved_bWantsToSprint;
 		CMC->Safe_bWantsToWalk = Saved_bWantsToWalk;
+		CMC->Safe_CoyoteTime = Saved_CoyoteTime;
 	}
 }
 

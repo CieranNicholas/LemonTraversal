@@ -33,6 +33,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide")
 	FLemonSlideSettings Slide;
 
+	/** Coyote time: grace period (seconds) after walking off a ledge during which a jump still counts as
+	 *  a grounded jump. Forgives pressing jump a moment too late. 0 disables it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump", meta = (ClampMin = "0"))
+	float CoyoteTime = 0.15f;
+
 	/** Returns the tuning struct for the requested gait (defaults to Run for safety). */
 	const FLemonGaitSettings& GetSettingsForGait(ELemonGait Gait) const;
 };
