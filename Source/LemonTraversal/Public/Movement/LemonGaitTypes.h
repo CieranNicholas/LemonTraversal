@@ -48,6 +48,7 @@ UENUM(BlueprintType)
 enum ELemonCustomMovementMode : uint8
 {
 	CMOVE_Slide		UMETA(DisplayName = "Slide"),
+	CMOVE_WallRun	UMETA(DisplayName = "Wall Run"),
 	CMOVE_MAX		UMETA(Hidden)
 };
 
@@ -91,4 +92,68 @@ struct FLemonSlideSettings
 	/** Upper speed clamp during a slide (cm/s) so momentum isn't capped by walking speeds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0"))
 	float MaxSpeed = 1600.f;
+};
+
+/**
+ * Tuning for the wall-run custom movement mode (CMOVE_WallRun). Authored in a ULemonMovementSet Data Asset.
+ * A zero-gravity, horizontal run along vertical walls that you hold into, capped by MaxDuration.
+ */
+USTRUCT(BlueprintType)
+struct FLemonWallRunSettings
+{
+	GENERATED_BODY()
+
+	/** Minimum horizontal speed to start AND sustain a wall run (cm/s). Drop below this and you detach. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float MinSpeed = 500.f;
+
+	/** Upper speed clamp while wall running (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float MaxSpeed = 1400.f;
+
+	/** How far past the capsule radius we sweep sideways to find a wall (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float WallReach = 45.f;
+
+	/** A surface counts as a wall only if |Normal.Z| <= this (0 = perfectly vertical, 1 = any slope). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0", ClampMax = "1"))
+	float MaxWallZ = 0.35f;
+
+	/** How hard you must steer AWAY from the wall to peel off mid-run (dot of input dir vs -WallNormal must
+	 *  drop below -this to detach). Engaging is gated by holding jump, not movement — this only governs the
+	 *  voluntary "steer off the wall" detach while running. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0", ClampMax = "1"))
+	float MinInputIntoWall = 0.35f;
+
+	/** Along-wall acceleration from forward input (cm/s^2). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float Acceleration = 2000.f;
+
+	/** Along-wall friction. Low keeps momentum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float Friction = 0.2f;
+
+	/** Gentle velocity pushed into the wall each tick to hold contact (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float StickForce = 200.f;
+
+	/** Max time a single wall run can last before it auto-detaches (s). 0 = unlimited. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float MaxDuration = 1.5f;
+
+	/** After a wall-jump or timeout, how long before you can re-attach (s). Stops infinite single-wall climbs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float ReattachCooldown = 0.4f;
+
+	/** Wall-jump speed pushed away from the wall, along its normal (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float WallJumpOutSpeed = 520.f;
+
+	/** Wall-jump vertical speed (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0"))
+	float WallJumpUpSpeed = 600.f;
+
+	/** Fraction of along-wall momentum carried into the wall-jump (0 = pure out+up, 1 = keep all forward speed). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0", ClampMax = "1"))
+	float WallJumpMomentumKeep = 0.5f;
 };

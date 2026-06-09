@@ -4,7 +4,9 @@
 #include "Movement/LemonMovementSet.h"
 #include "Movement/LemonSavedMove.h"
 #include "GameFramework/Character.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 
 #if !UE_BUILD_SHIPPING
@@ -18,7 +20,11 @@ ULemonCharacterMovementComponent::ULemonCharacterMovementComponent()
 {
 	Safe_bWantsToSprint = 0;
 	Safe_bWantsToWalk = 0;
+	Safe_bWantsToWallRun = 0;
 	Safe_CoyoteTime = 0.f;
+	Safe_WallRunTime = 0.f;
+	Safe_WallRunCooldown = 0.f;
+	WallRunNormal = FVector::ZeroVector;
 	CurrentGait = ELemonGait::Run;
 
 	// Fallback used only when no MovementSet asset is assigned (mirrors ULemonMovementSet's Run defaults).
@@ -35,6 +41,11 @@ void ULemonCharacterMovementComponent::SetSprintHeld(bool bHeld)
 void ULemonCharacterMovementComponent::SetWalkHeld(bool bHeld)
 {
 	Safe_bWantsToWalk = bHeld ? 1 : 0;
+}
+
+void ULemonCharacterMovementComponent::SetWallRunHeld(bool bHeld)
+{
+	Safe_bWantsToWallRun = bHeld ? 1 : 0;
 }
 
 bool ULemonCharacterMovementComponent::ShouldUseGaitTuning() const
@@ -85,6 +96,10 @@ ELemonGait ULemonCharacterMovementComponent::ResolveGait() const
 
 float ULemonCharacterMovementComponent::GetMaxSpeed() const
 {
+	if (IsWallRunning())
+	{
+		return GetWallRunSettings().MaxSpeed;
+	}
 	if (IsSliding())
 	{
 		return GetSlideSettings().MaxSpeed;
@@ -125,6 +140,7 @@ void ULemonCharacterMovementComponent::UpdateFromCompressedFlags(uint8 Flags)
 	// Server (and replayed client moves) reconstruct intent from the flags packed in GetCompressedFlags().
 	Safe_bWantsToSprint = (Flags & FSavedMove_Character::FLAG_Custom_0) != 0;
 	Safe_bWantsToWalk = (Flags & FSavedMove_Character::FLAG_Custom_1) != 0;
+	Safe_bWantsToWallRun = (Flags & FSavedMove_Character::FLAG_Custom_2) != 0;
 }
 
 void ULemonCharacterMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector& OldLocation, const FVector& OldVelocity)
@@ -138,11 +154,13 @@ void ULemonCharacterMovementComponent::OnMovementUpdated(float DeltaSeconds, con
 	if (CVarLemonSlideDebug.GetValueOnGameThread() && GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
 		const TCHAR* ModeStr = IsSliding() ? TEXT("SLIDE")
+			: IsWallRunning() ? TEXT("WALLRUN")
 			: (IsMovingOnGround() ? TEXT("Ground") : (IsFalling() ? TEXT("Falling") : TEXT("Other")));
 		GEngine->AddOnScreenDebugMessage(0x1E33, 0.f, FColor::Cyan,
-			FString::Printf(TEXT("Lemon | %s | Spd %.0f (2D %.0f) | Floor %d | WantsCrouch %d | Coyote %.2f/%.2f%s"),
+			FString::Printf(TEXT("Lemon | %s | Spd %.0f (2D %.0f) | Floor %d | WantsCrouch %d | Coyote %.2f/%.2f%s | WR t%.2f cd%.2f hold%d"),
 				ModeStr, Velocity.Size(), Velocity.Size2D(), CurrentFloor.IsWalkableFloor() ? 1 : 0, (int32)bWantsToCrouch,
-				Safe_CoyoteTime, GetCoyoteTime(), CanCoyoteJump() ? TEXT(" [JUMP OK]") : TEXT("")));
+				Safe_CoyoteTime, GetCoyoteTime(), CanCoyoteJump() ? TEXT(" [JUMP OK]") : TEXT(""),
+				Safe_WallRunTime, Safe_WallRunCooldown, (int32)Safe_bWantsToWallRun));
 	}
 #endif
 }
@@ -247,8 +265,9 @@ bool ULemonCharacterMovementComponent::CanCrouchInCurrentState() const
 
 bool ULemonCharacterMovementComponent::CanAttemptJump() const
 {
-	// Allow jumping out of a slide (slide-hop). The base blocks it because bWantsToCrouch is set.
-	if (IsSliding())
+	// Allow jumping out of a slide (slide-hop) or a wall run (wall-jump). The base blocks both because it
+	// requires IsMovingOnGround()/IsFalling() (custom modes are neither) and, for slide, bWantsToCrouch is set.
+	if (IsSliding() || IsWallRunning())
 	{
 		return IsJumpAllowed();
 	}
@@ -280,6 +299,25 @@ void ULemonCharacterMovementComponent::UpdateCharacterStateBeforeMovement(float 
 	{
 		SetMovementMode(MOVE_Custom, CMOVE_Slide);
 	}
+
+	// Wall-run re-attach cooldown ticks down every move (it's set on a wall-jump or a duration timeout).
+	if (Safe_WallRunCooldown > 0.f)
+	{
+		Safe_WallRunCooldown = FMath::Max(0.f, Safe_WallRunCooldown - DeltaSeconds);
+	}
+
+	// Enter a wall run from the air: a near-vertical wall we're holding into, moving fast enough, and past
+	// the cooldown. Like the slide-hop, the cooldown also stops a wall-jump from instantly re-attaching.
+	if (MovementMode == MOVE_Falling && Safe_WallRunCooldown <= 0.f)
+	{
+		FVector WallNormal;
+		FHitResult WallHit;
+		if (CanWallRun(WallNormal, WallHit))
+		{
+			WallRunNormal = WallNormal; // cache before the mode change so EnterWallRun() can use it
+			SetMovementMode(MOVE_Custom, CMOVE_WallRun);
+		}
+	}
 }
 
 void ULemonCharacterMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode)
@@ -294,6 +332,15 @@ void ULemonCharacterMovementComponent::OnMovementModeChanged(EMovementMode Previ
 	{
 		ExitSlide();
 	}
+
+	if (IsWallRunning())
+	{
+		EnterWallRun();
+	}
+	else if (PreviousMovementMode == MOVE_Custom && PreviousCustomMode == CMOVE_WallRun)
+	{
+		ExitWallRun();
+	}
 }
 
 void ULemonCharacterMovementComponent::PhysCustom(float DeltaTime, int32 Iterations)
@@ -303,6 +350,10 @@ void ULemonCharacterMovementComponent::PhysCustom(float DeltaTime, int32 Iterati
 	if (CustomMovementMode == CMOVE_Slide)
 	{
 		PhysSlide(DeltaTime, Iterations);
+	}
+	else if (CustomMovementMode == CMOVE_WallRun)
+	{
+		PhysWallRun(DeltaTime, Iterations);
 	}
 }
 
@@ -412,4 +463,293 @@ void ULemonCharacterMovementComponent::PhysSlide(float deltaTime, int32 Iteratio
 		}
 		MaintainHorizontalGroundVelocity();
 	}
+}
+
+/*
+	* Wall run (CMOVE_WallRun)
+	* A custom movement mode entered from the air. Zero-gravity horizontal run along a near-vertical wall
+	* you hold into, capped by MaxDuration, exited by a wall-jump (DoJump override) that rides the existing
+	* jump flag. Two predicted scalars (Safe_WallRunTime / Safe_WallRunCooldown) thread through the saved
+	* move; the wall normal is re-traced each tick, so it is NOT stored predicted state.
+*/
+
+bool ULemonCharacterMovementComponent::IsWallRunning() const
+{
+	return (MovementMode == MOVE_Custom) && (CustomMovementMode == CMOVE_WallRun);
+}
+
+float ULemonCharacterMovementComponent::GetWallRunSide() const
+{
+	if (!IsWallRunning() || WallRunNormal.IsNearlyZero() || !UpdatedComponent)
+	{
+		return 0.f;
+	}
+	// The wall sits opposite its outward normal. Wall on our right => normal points left => dot(Right, N) < 0.
+	return (FVector::DotProduct(UpdatedComponent->GetRightVector(), WallRunNormal) < 0.f) ? 1.f : -1.f;
+}
+
+const FLemonWallRunSettings& ULemonCharacterMovementComponent::GetWallRunSettings() const
+{
+	if (MovementSet)
+	{
+		return MovementSet->WallRun;
+	}
+	return DefaultWallRunSettings;
+}
+
+bool ULemonCharacterMovementComponent::DetectWall(FVector& OutNormal, FHitResult& OutHit) const
+{
+	if (!CharacterOwner || !UpdatedComponent)
+	{
+		return false;
+	}
+
+	const FLemonWallRunSettings& WR = GetWallRunSettings();
+
+	float CapsuleRadius = 34.f;
+	float CapsuleHalfHeight = 88.f;
+	if (const UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent())
+	{
+		Capsule->GetScaledCapsuleSize(CapsuleRadius, CapsuleHalfHeight);
+	}
+
+	const FVector Location = UpdatedComponent->GetComponentLocation();
+	const FQuat Rotation = UpdatedComponent->GetComponentQuat();
+	const FVector Right = UpdatedComponent->GetRightVector();
+	const float Reach = CapsuleRadius + WR.WallReach;
+
+	FCollisionQueryParams Params(FName(TEXT("LemonWallRun")), false, CharacterOwner);
+	FCollisionResponseParams ResponseParam;
+	InitCollisionParams(Params, ResponseParam);
+	const ECollisionChannel Channel = UpdatedComponent->GetCollisionObjectType();
+	const FCollisionShape Shape = GetPawnCapsuleCollisionShape(SHRINK_None);
+
+	FHitResult RightHit(1.f);
+	FHitResult LeftHit(1.f);
+	const bool bRight = GetWorld()->SweepSingleByChannel(RightHit, Location, Location + Right * Reach, Rotation, Channel, Shape, Params, ResponseParam);
+	const bool bLeft = GetWorld()->SweepSingleByChannel(LeftHit, Location, Location - Right * Reach, Rotation, Channel, Shape, Params, ResponseParam);
+
+	// Only near-vertical surfaces count as walls.
+	const bool bRightWall = bRight && RightHit.bBlockingHit && FMath::Abs(RightHit.ImpactNormal.Z) <= WR.MaxWallZ;
+	const bool bLeftWall = bLeft && LeftHit.bBlockingHit && FMath::Abs(LeftHit.ImpactNormal.Z) <= WR.MaxWallZ;
+
+	if (!bRightWall && !bLeftWall)
+	{
+		return false;
+	}
+
+	bool bChooseRight = bRightWall;
+	if (bRightWall && bLeftWall)
+	{
+		// Both sides hit: pick the one our movement input is pushing toward.
+		const FVector InputDir = Acceleration.GetSafeNormal2D();
+		const float RightScore = FVector::DotProduct(InputDir, (-RightHit.ImpactNormal).GetSafeNormal2D());
+		const float LeftScore = FVector::DotProduct(InputDir, (-LeftHit.ImpactNormal).GetSafeNormal2D());
+		bChooseRight = RightScore >= LeftScore;
+	}
+
+	OutHit = bChooseRight ? RightHit : LeftHit;
+	OutNormal = OutHit.ImpactNormal.GetSafeNormal();
+	return true;
+}
+
+bool ULemonCharacterMovementComponent::CanWallRun(FVector& OutNormal, FHitResult& OutHit) const
+{
+	const FLemonWallRunSettings& WR = GetWallRunSettings();
+
+	// Must be holding jump (the engage input) and airborne *because we jumped* — JumpCurrentCount stays 0
+	// when you merely walk off a ledge, so this blocks wall-running from a plain fall.
+	if (!Safe_bWantsToWallRun || !CharacterOwner || CharacterOwner->JumpCurrentCount <= 0)
+	{
+		return false;
+	}
+
+	// Enough horizontal speed to be worth attaching.
+	if (Velocity.Size2D() < WR.MinSpeed)
+	{
+		return false;
+	}
+
+	return DetectWall(OutNormal, OutHit);
+}
+
+void ULemonCharacterMovementComponent::EnterWallRun()
+{
+	const FLemonWallRunSettings& WR = GetWallRunSettings();
+
+	Safe_WallRunTime = 0.f;
+
+	// Zero-G entry: drop the fall, keep the entry speed but redirect it cleanly along the wall plane.
+	FVector Horizontal = Velocity;
+	Horizontal.Z = 0.f;
+	const float EntrySpeed = FMath::Min(Horizontal.Size(), WR.MaxSpeed);
+
+	FVector AlongDir = FVector::VectorPlaneProject(Horizontal, WallRunNormal).GetSafeNormal();
+	if (AlongDir.IsNearlyZero())
+	{
+		AlongDir = Horizontal.GetSafeNormal();
+	}
+	Velocity = AlongDir * EntrySpeed;
+}
+
+void ULemonCharacterMovementComponent::ExitWallRun()
+{
+	// Clear the cached normal so the camera tilt relaxes; hook point for future wall-run anim/camera state.
+	WallRunNormal = FVector::ZeroVector;
+}
+
+void ULemonCharacterMovementComponent::PhysWallRun(float deltaTime, int32 Iterations)
+{
+	if (deltaTime < MIN_TICK_TIME)
+	{
+		return;
+	}
+
+	const FLemonWallRunSettings& WR = GetWallRunSettings();
+
+	// Sub-step loop, mirroring PhysWalking / PhysSlide so behaviour is framerate-independent.
+	float remainingTime = deltaTime;
+	while ((remainingTime >= MIN_TICK_TIME) && (Iterations < MaxSimulationIterations) && CharacterOwner
+		&& (CharacterOwner->Controller || bRunPhysicsWithNoController || CharacterOwner->GetLocalRole() == ROLE_SimulatedProxy))
+	{
+		Iterations++;
+		const float timeTick = GetSimulationTimeStep(remainingTime, Iterations);
+		remainingTime -= timeTick;
+
+		// Is there still a wall to run on? If not, drop to falling WITHOUT a cooldown so you can chain to
+		// the next wall immediately.
+		FVector WallNormal;
+		FHitResult WallHit;
+		if (!DetectWall(WallNormal, WallHit))
+		{
+			SetMovementMode(MOVE_Falling);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+		WallRunNormal = WallNormal;
+
+		const FVector IntoWall = (-WallNormal).GetSafeNormal2D();
+		const FVector InputDir = Acceleration.GetSafeNormal2D();
+
+		// Detach if the player actively steers AWAY from the wall, or we've slowed below the threshold.
+		// (Sustaining is lenient — you only need to lean in to *start*, then momentum carries the run.)
+		const bool bPullingAway = !InputDir.IsNearlyZero() && FVector::DotProduct(InputDir, IntoWall) < -WR.MinInputIntoWall;
+		if (bPullingAway || Velocity.Size2D() < WR.MinSpeed)
+		{
+			SetMovementMode(MOVE_Falling);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		// Zero-G duration cap: after MaxDuration, pop off and start the re-attach cooldown so the same wall
+		// can't be ridden forever.
+		Safe_WallRunTime += timeTick;
+		if (WR.MaxDuration > 0.f && Safe_WallRunTime > WR.MaxDuration)
+		{
+			Safe_WallRunCooldown = WR.ReattachCooldown;
+			SetMovementMode(MOVE_Falling);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		const FVector OldLocation = UpdatedComponent->GetComponentLocation();
+
+		RestorePreAdditiveRootMotionVelocity();
+
+		// Horizontal along-wall axis, oriented to our current heading so forward input accelerates "forward".
+		FVector WallTangent = FVector::CrossProduct(WallNormal, FVector::UpVector).GetSafeNormal();
+		if (FVector::DotProduct(WallTangent, Velocity) < 0.f)
+		{
+			WallTangent = -WallTangent;
+		}
+
+		// Bleed with friction, accelerate along the wall by how aligned input is with the run direction.
+		float Speed = Velocity.Size2D();
+		Speed -= Speed * WR.Friction * timeTick;
+		const float Align = InputDir.IsNearlyZero() ? 0.f : FVector::DotProduct(InputDir, WallTangent);
+		if (Align > 0.f)
+		{
+			Speed += WR.Acceleration * Align * timeTick;
+		}
+		Speed = FMath::Clamp(Speed, 0.f, WR.MaxSpeed);
+
+		// Compose: run along the wall + a gentle push into it to hold contact, with zero vertical motion.
+		Velocity = WallTangent * Speed + IntoWall * WR.StickForce;
+		Velocity.Z = 0.f;
+
+		ApplyRootMotionToVelocity(timeTick);
+
+		// Move, handling impacts like PhysFlying (HandleImpact + SlideAlongSurface).
+		const FVector Adjusted = Velocity * timeTick;
+		FHitResult Hit(1.f);
+		SafeMoveUpdatedComponent(Adjusted, UpdatedComponent->GetComponentQuat(), true, Hit);
+
+		if (Hit.Time < 1.f)
+		{
+			HandleImpact(Hit, timeTick, Adjusted);
+			SlideAlongSurface(Adjusted, (1.f - Hit.Time), Hit.Normal, Hit, true);
+		}
+
+		if (MovementMode != MOVE_Custom)
+		{
+			// An impact changed the mode (e.g. entered water); let the new mode take over.
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+
+		// Derive velocity from the actual move (collisions bleed speed), keeping it horizontal (zero-G).
+		if (!bJustTeleported && timeTick >= MIN_TICK_TIME)
+		{
+			Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / timeTick;
+			Velocity.Z = 0.f;
+		}
+
+		// Landed (wall met the floor)? Hand back to walking.
+		FindFloor(UpdatedComponent->GetComponentLocation(), CurrentFloor, false);
+		if (CurrentFloor.IsWalkableFloor() && CurrentFloor.GetDistanceToFloor() < 2.4f)
+		{
+			SetMovementMode(MOVE_Walking);
+			StartNewPhysics(remainingTime, Iterations);
+			return;
+		}
+	}
+}
+
+bool ULemonCharacterMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
+{
+	// Wall-jump: leap out from the wall and up, carrying some along-wall momentum. Rides the existing jump
+	// flag (CheckJumpInput -> CanJump -> DoJump), so it needs no new predicted state of its own.
+	if (IsWallRunning() && CharacterOwner && CharacterOwner->CanJump())
+	{
+		const FLemonWallRunSettings& WR = GetWallRunSettings();
+
+		// Prefer a freshly traced wall normal; fall back to the cached one.
+		FVector Normal = WallRunNormal;
+		FHitResult WallHit;
+		FVector Detected;
+		if (DetectWall(Detected, WallHit))
+		{
+			Normal = Detected;
+		}
+		Normal = Normal.GetSafeNormal2D();
+		if (Normal.IsNearlyZero())
+		{
+			Normal = UpdatedComponent ? UpdatedComponent->GetForwardVector().GetSafeNormal2D() : FVector::ForwardVector;
+		}
+
+		// Keep a fraction of the along-wall momentum (strip the into/out-of-wall component first).
+		FVector Along = Velocity;
+		Along.Z = 0.f;
+		Along = FVector::VectorPlaneProject(Along, Normal);
+
+		Velocity = Normal * WR.WallJumpOutSpeed
+			+ FVector::UpVector * WR.WallJumpUpSpeed
+			+ Along * WR.WallJumpMomentumKeep;
+
+		Safe_WallRunCooldown = WR.ReattachCooldown;
+		SetMovementMode(MOVE_Falling);
+		return true;
+	}
+
+	return Super::DoJump(bReplayingMoves, DeltaTime);
 }

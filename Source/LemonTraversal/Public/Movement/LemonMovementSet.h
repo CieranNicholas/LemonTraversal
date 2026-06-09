@@ -33,6 +33,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide")
 	FLemonSlideSettings Slide;
 
+	/** Tuning for the wall-run custom movement mode (CMOVE_WallRun). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun")
+	FLemonWallRunSettings WallRun;
+
 	/** Coyote time: grace period (seconds) after walking off a ledge during which a jump still counts as
 	 *  a grounded jump. Forgives pressing jump a moment too late. 0 disables it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump", meta = (ClampMin = "0"))

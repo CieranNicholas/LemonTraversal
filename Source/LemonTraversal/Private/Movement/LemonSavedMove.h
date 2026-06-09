@@ -24,10 +24,16 @@ public:
 	/** Snapshot of the CMC's prediction-safe intent at the time this move was made. */
 	uint8 Saved_bWantsToSprint : 1;
 	uint8 Saved_bWantsToWalk : 1;
+	uint8 Saved_bWantsToWallRun : 1;
 
 	/** Airborne time carried for coyote-time prediction (mirrors the CMC's Safe_CoyoteTime). Unlike the
 	 *  booleans above this is continuous state, so it rides here rather than in a compressed flag. */
 	float Saved_CoyoteTime;
+
+	/** Wall-run elapsed time + re-attach cooldown (mirror the CMC's Safe_WallRun* scalars). Same treatment
+	 *  as Saved_CoyoteTime: continuous predicted state, threaded for correct replay after a correction. */
+	float Saved_WallRunTime;
+	float Saved_WallRunCooldown;
 
 	FSavedMove_Lemon();
 
