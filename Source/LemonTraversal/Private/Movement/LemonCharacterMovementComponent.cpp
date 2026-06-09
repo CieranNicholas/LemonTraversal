@@ -133,6 +133,33 @@ float ULemonCharacterMovementComponent::GetMaxBrakingDeceleration() const
 	return Super::GetMaxBrakingDeceleration();
 }
 
+void ULemonCharacterMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration)
+{
+	// While falling, replace the engine's lerp-toward-input air control with Source-style air strafing.
+	// PhysFalling has already zeroed Velocity.Z and guarded Acceleration to the lateral air accel before
+	// calling this, and re-applies gravity afterwards — so here we only touch horizontal velocity.
+	if (IsFalling() && GetAirSettings().bEnableAirStrafe)
+	{
+		CalcAirStrafeVelocity(DeltaTime);
+		return;
+	}
+	Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
+}
+
+FVector ULemonCharacterMovementComponent::GetFallingLateralAcceleration(float DeltaTime)
+{
+	// Feed CalcVelocity the FULL input direction while air strafing — the engine would otherwise scale it
+	// down by AirControl, which would smother the strafe. We compute the actual air accel ourselves in
+	// CalcAirStrafeVelocity; only the direction of this vector is used there.
+	if (GetAirSettings().bEnableAirStrafe)
+	{
+		FVector FallAccel = Acceleration;
+		FallAccel.Z = 0.f;
+		return FallAccel.GetClampedToMaxSize(GetMaxAcceleration());
+	}
+	return Super::GetFallingLateralAcceleration(DeltaTime);
+}
+
 void ULemonCharacterMovementComponent::UpdateFromCompressedFlags(uint8 Flags)
 {
 	Super::UpdateFromCompressedFlags(Flags);
@@ -752,4 +779,72 @@ bool ULemonCharacterMovementComponent::DoJump(bool bReplayingMoves, float DeltaT
 	}
 
 	return Super::DoJump(bReplayingMoves, DeltaTime);
+}
+
+/*
+	* Air strafe
+	* Source-style air acceleration applied while falling (from CalcVelocity). No new predicted state — it's
+	* pure velocity-from-input inside the move, so it predicts/corrects for free.
+*/
+
+void ULemonCharacterMovementComponent::CalcAirStrafeVelocity(float DeltaTime)
+{
+	const FLemonAirSettings& Air = GetAirSettings();
+
+	// Build the air wish direction. By default only the STRAFE (left/right) axis contributes: holding W
+	// from a run would otherwise add a forward component that aligns with your velocity, shrinking AddSpeed
+	// and making A/D feel like they don't register. Strafe-only matches Counter-Strike air strafing — keep
+	// holding W harmlessly while A/D + mouse-turn does the accelerating.
+	// (PhysFalling guards Acceleration to our GetFallingLateralAcceleration result = the full input dir.)
+	FVector WishDir;
+	if (Air.bAirStrafeLateralOnly && UpdatedComponent)
+	{
+		const FVector RightDir = UpdatedComponent->GetRightVector();
+		const float StrafeInput = FVector::DotProduct(Acceleration, RightDir);
+		WishDir = (RightDir * StrafeInput).GetSafeNormal2D();
+	}
+	else
+	{
+		WishDir = Acceleration.GetSafeNormal2D();
+	}
+
+	if (WishDir.IsNearlyZero())
+	{
+		// No strafe input: keep horizontal momentum (no air friction). Gravity is applied by PhysFalling.
+		return;
+	}
+
+	// You can only accelerate up to AirSpeedCap along the CURRENT input direction (CurrentSpeed is the
+	// velocity already projected onto WishDir). Turning the input keeps that projection low, so each frame
+	// adds a little velocity in a new direction — this is what lets strafe + mouse-turn build speed.
+	const float CurrentSpeed = FVector::DotProduct(Velocity, WishDir);
+	const float AddSpeed = Air.AirSpeedCap - CurrentSpeed;
+	if (AddSpeed <= 0.f)
+	{
+		return;
+	}
+
+	const float AccelSpeed = FMath::Min(Air.AirAcceleration * DeltaTime, AddSpeed);
+
+	const float PreSpeed = Velocity.Size2D();
+	Velocity += WishDir * AccelSpeed;
+
+	// Hard cap: strafing can't push horizontal speed past MaxAirSpeed, but pre-existing over-cap momentum
+	// (e.g. carried out of a slide-hop) is preserved rather than braked.
+	const float SpeedLimit = FMath::Max(PreSpeed, Air.MaxAirSpeed);
+	if (Velocity.Size2D() > SpeedLimit)
+	{
+		const FVector Dir = Velocity.GetSafeNormal2D();
+		Velocity.X = Dir.X * SpeedLimit;
+		Velocity.Y = Dir.Y * SpeedLimit;
+	}
+}
+
+const FLemonAirSettings& ULemonCharacterMovementComponent::GetAirSettings() const
+{
+	if (MovementSet)
+	{
+		return MovementSet->Air;
+	}
+	return DefaultAirSettings;
 }

@@ -66,6 +66,8 @@ public:
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
 	virtual float GetMaxBrakingDeceleration() const override;
+	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
+	virtual FVector GetFallingLateralAcceleration(float DeltaTime) override;
 	virtual void UpdateFromCompressedFlags(uint8 Flags) override;
 	virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
 	virtual bool CanAttemptJump() const override;
@@ -130,6 +132,13 @@ protected:
 	/** Active wall-run tuning, falling back to built-in defaults when no MovementSet is assigned. */
 	const FLemonWallRunSettings& GetWallRunSettings() const;
 
+	// --- Air strafe ---
+	/** Source-style air-strafe velocity integration. Called from CalcVelocity while falling. */
+	void CalcAirStrafeVelocity(float DeltaTime);
+
+	/** Active air-strafe tuning, falling back to built-in defaults when no MovementSet is assigned. */
+	const FLemonAirSettings& GetAirSettings() const;
+
 	// --- Prediction-safe intent --------------------------------------------------------------
 	// Mirrored into FSavedMove_Lemon and packed into compressed flags. The "Safe_" prefix marks
 	// state that must survive client move replay during server correction.
@@ -164,5 +173,6 @@ private:
 	FLemonGaitSettings DefaultGaitSettings;
 	FLemonSlideSettings DefaultSlideSettings;
 	FLemonWallRunSettings DefaultWallRunSettings;
+	FLemonAirSettings DefaultAirSettings;
 	float DefaultCoyoteTime = 0.15f;
 };

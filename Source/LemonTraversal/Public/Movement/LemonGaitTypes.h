@@ -157,3 +157,38 @@ struct FLemonWallRunSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun", meta = (ClampMin = "0", ClampMax = "1"))
 	float WallJumpMomentumKeep = 0.5f;
 };
+
+/**
+ * Tuning for Source-style air strafing while falling. Authored in a ULemonMovementSet Data Asset.
+ * Strafe + turn to accelerate in the air; capped so speed can't run away.
+ */
+USTRUCT(BlueprintType)
+struct FLemonAirSettings
+{
+	GENERATED_BODY()
+
+	/** Master toggle. Off = the engine's default air control (lerp toward input, no speed gain). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air")
+	bool bEnableAirStrafe = true;
+
+	/** Only the strafe (left/right) input drives air acceleration; forward/back is ignored in the air. Lets
+	 *  you keep holding W from a run without it diluting the A/D strafe (Counter-Strike feel). Off = the
+	 *  full input direction is used (authentic, but then holding W weakens strafing). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air")
+	bool bAirStrafeLateralOnly = true;
+
+	/** Air acceleration toward the input direction (cm/s^2). Higher = snappier strafing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air", meta = (ClampMin = "0"))
+	float AirAcceleration = 6000.f;
+
+	/** Per-direction "wish speed" cap (cm/s). Keep LOW — this is the trick that makes strafe+turn gain
+	 *  speed: you can only accelerate up to this along any single input direction, so curving the input
+	 *  (mouse turn + strafe) keeps adding velocity in new directions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air", meta = (ClampMin = "0"))
+	float AirSpeedCap = 300.f;
+
+	/** Hard cap on total horizontal air speed (cm/s) so strafing can't run away. Pre-existing momentum
+	 *  already above this (e.g. a slide-hop) is preserved but never grown further. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air", meta = (ClampMin = "0"))
+	float MaxAirSpeed = 1400.f;
+};

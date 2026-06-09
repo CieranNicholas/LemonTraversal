@@ -37,6 +37,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WallRun")
 	FLemonWallRunSettings WallRun;
 
+	/** Tuning for Source-style air strafing while falling. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air")
+	FLemonAirSettings Air;
+
 	/** Coyote time: grace period (seconds) after walking off a ledge during which a jump still counts as
 	 *  a grounded jump. Forgives pressing jump a moment too late. 0 disables it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump", meta = (ClampMin = "0"))
